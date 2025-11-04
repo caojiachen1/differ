@@ -41,6 +41,7 @@ private:
     void loadAllFromDb();
     void loadSettings();
     void saveSettings();
+    void setPreviewFromImage(const QImage& img);
 
     // UI
     QListView* m_listView{};

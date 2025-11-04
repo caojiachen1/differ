@@ -1,5 +1,7 @@
+// Updated file with asymmetric spacing for thumbnails and preview layout margins
 #include "MainWindow.h"
 #include "ThumbnailModel.h"
+#include "ThumbnailDelegate.h"
 #include "ImageIndexer.h"
 
 #include <QtWidgets>
@@ -44,7 +46,13 @@ void MainWindow::setupUi() {
     m_listView->setUniformItemSizes(true);
     m_listView->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_listView->setWordWrap(true);
-    m_listView->setSpacing(8);
+    // 适度拉开图片之间距离
+    m_listView->setSpacing(6);
+    m_listView->setTextElideMode(Qt::ElideMiddle);
+    // 启用 hover 探测，并安装自定义委托，让悬停框覆盖整格
+    m_listView->setMouseTracking(true);
+    m_listView->viewport()->setAttribute(Qt::WA_Hover, true);
+    m_listView->setItemDelegate(new ThumbnailDelegate(m_listView));
     setCentralWidget(m_listView);
 
     // Left dock
@@ -78,10 +86,15 @@ void MainWindow::setupUi() {
     m_rightDock = new QDockWidget("预览", this);
     auto right = new QWidget(this);
     auto rightLay = new QVBoxLayout(right);
+    // 上下增加留白，左右更紧凑
+    rightLay->setContentsMargins(4, 12, 4, 12);
     m_previewLabel = new QLabel(right);
     m_previewLabel->setAlignment(Qt::AlignCenter);
-    m_previewLabel->setMinimumHeight(200);
+    m_previewLabel->setScaledContents(false);
+    m_previewLabel->setMinimumSize(200, 200);
+    m_previewLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     m_previewLabel->setFrameShape(QFrame::StyledPanel);
+    m_previewLabel->setAutoFillBackground(true);
     m_metaLabel = new QLabel(right);
     m_metaLabel->setWordWrap(true);
     m_queryBtn = new QPushButton("以所选/图片为查询，查找相似", right);
@@ -119,6 +132,15 @@ void MainWindow::setupUi() {
     m_progress->setRange(0, 100);
     m_progress->setValue(0);
     statusBar()->addPermanentWidget(m_progress, 1);
+
+    // 初始化一次网格尺寸：为图片与下方文件名预留空间
+    {
+        const int v = m_thumbSizeSlider->value();
+        const QSize iconSize(v, v);
+        QFontMetrics fm(m_listView->font());
+        m_listView->setIconSize(iconSize);
+        m_listView->setGridSize(ThumbnailDelegate::cellSizeForIcon(iconSize, fm));
+    }
 }
 
 void MainWindow::setupConnections() {
@@ -126,8 +148,11 @@ void MainWindow::setupConnections() {
     connect(m_indexBtn, &QPushButton::clicked, [this]{ startIndexing(m_folderEdit->text()); });
     connect(m_thumbSizeSlider, &QSlider::valueChanged, [this](int v){
         m_thumbSizeLabel->setText(QString("缩略图: %1px").arg(v));
-        m_listView->setIconSize(QSize(v, v));
-        // 触发重绘即可；QListView 在 Adjust 模式下会自动布局
+        const QSize iconSize(v, v);
+        QFontMetrics fm(m_listView->font());
+        m_listView->setIconSize(iconSize);
+        m_listView->setGridSize(ThumbnailDelegate::cellSizeForIcon(iconSize, fm));
+        m_listView->doItemsLayout();
         m_listView->viewport()->update();
     });
     connect(m_openQueryAction, &QAction::triggered, this, &MainWindow::openQueryImage);
@@ -178,7 +203,7 @@ void MainWindow::openQueryImage() {
 
     QImageReader reader(fn);
     reader.setAutoTransform(true);
-    QSize pv = m_previewLabel->size() * devicePixelRatioF();
+    QSize pv = m_previewLabel->size();
     if (pv.width() > 0 && pv.height() > 0) {
         QSize tgt = reader.size();
         if (tgt.isValid()) {
@@ -191,7 +216,7 @@ void MainWindow::openQueryImage() {
         QMessageBox::warning(this, "错误", "无法打开图片");
         return;
     }
-    m_previewLabel->setPixmap(QPixmap::fromImage(img.scaled(m_previewLabel->size()*devicePixelRatioF(), Qt::KeepAspectRatio, Qt::SmoothTransformation)));
+    setPreviewFromImage(img);
 
     // Perform search
     auto results = m_model->searchSimilar(fn, m_topKSpin->value(), m_hammingSlider->value());
@@ -216,7 +241,7 @@ void MainWindow::onSelectionChanged() {
     QString path = m_model->pathForIndex(sel.first());
     QImageReader reader(path);
     reader.setAutoTransform(true);
-    QSize pv = m_previewLabel->size() * devicePixelRatioF();
+    QSize pv = m_previewLabel->size();
     if (pv.width() > 0 && pv.height() > 0) {
         QSize tgt = reader.size();
         if (tgt.isValid()) {
@@ -226,13 +251,25 @@ void MainWindow::onSelectionChanged() {
     }
     QImage img = reader.read();
     if (!img.isNull()) {
-        m_previewLabel->setPixmap(QPixmap::fromImage(img.scaled(m_previewLabel->size()*devicePixelRatioF(), Qt::KeepAspectRatio, Qt::SmoothTransformation)));
+        setPreviewFromImage(img);
         QFileInfo fi(path);
         m_metaLabel->setText(QString("%1\n%2\n%3x%4")
             .arg(fi.fileName())
             .arg(humanSize(fi.size()))
             .arg(img.width()).arg(img.height()));
     }
+}
+
+void MainWindow::setPreviewFromImage(const QImage& img) {
+    if (img.isNull()) { m_previewLabel->clear(); return; }
+    m_previewLabel->clear();
+    QSize target = m_previewLabel->size();
+    if (target.width() <= 0 || target.height() <= 0) {
+        m_previewLabel->setPixmap(QPixmap::fromImage(img));
+        return;
+    }
+    QPixmap pm = QPixmap::fromImage(img.scaled(target, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    m_previewLabel->setPixmap(pm);
 }
 
 void MainWindow::loadAllFromDb() {

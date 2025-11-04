@@ -16,6 +16,8 @@ set(PROJECT_SOURCES
     src/main.cpp
     src/MainWindow.cpp
     src/MainWindow.h
+    src/ThumbnailDelegate.cpp
+    src/ThumbnailDelegate.h
     src/ImageHash.cpp
     src/ImageHash.h
     src/SqliteStore.cpp
