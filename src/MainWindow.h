@@ -63,6 +63,7 @@ private:
 
     // Toolbar/search
     QAction* m_openQueryAction{};
+    QAction* m_showAllAction{};
     QSpinBox* m_topKSpin{};
     QSlider* m_hammingSlider{};
     QLabel* m_hammingValue{};

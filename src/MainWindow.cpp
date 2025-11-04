@@ -110,6 +110,7 @@ void MainWindow::setupUi() {
     // Toolbar
     auto tb = addToolBar("工具");
     m_openQueryAction = tb->addAction("打开查询图片");
+    m_showAllAction = tb->addAction("显示全部");
 
     tb->addSeparator();
     tb->addWidget(new QLabel("TopK:"));
@@ -146,6 +147,7 @@ void MainWindow::setupUi() {
 void MainWindow::setupConnections() {
     connect(m_browseBtn, &QPushButton::clicked, this, &MainWindow::chooseFolder);
     connect(m_indexBtn, &QPushButton::clicked, [this]{ startIndexing(m_folderEdit->text()); });
+    connect(m_showAllAction, &QAction::triggered, [this]{ loadAllFromDb(); });
     connect(m_thumbSizeSlider, &QSlider::valueChanged, [this](int v){
         m_thumbSizeLabel->setText(QString("缩略图: %1px").arg(v));
         const QSize iconSize(v, v);
