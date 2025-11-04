@@ -8,6 +8,12 @@ namespace ImageHash {
     // 64-bit perceptual hash
     quint64 pHash(const QImage& src);
 
+        // 64-bit average hash (aHash)
+        quint64 aHash(const QImage& src);
+
+        // 64-bit difference hash (dHash)
+        quint64 dHash(const QImage& src);
+
     inline int hammingDistance(quint64 a, quint64 b) {
         quint64 x = a ^ b;
 #if defined(_MSC_VER)

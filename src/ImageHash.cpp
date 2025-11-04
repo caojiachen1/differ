@@ -79,3 +79,43 @@ quint64 ImageHash::pHash(const QImage& src) {
     }
     return hash;
 }
+
+quint64 ImageHash::aHash(const QImage& src) {
+    if (src.isNull()) return 0;
+    QImage img = src.convertToFormat(QImage::Format_Grayscale8).scaled(8, 8, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    // Compute average
+    uint64_t sum = 0;
+    for (int y = 0; y < 8; ++y) {
+        const uchar* line = img.constScanLine(y);
+        for (int x = 0; x < 8; ++x) sum += line[x];
+    }
+    const int avg = int(sum / 64);
+    quint64 h = 0;
+    int bit = 0;
+    for (int y = 0; y < 8; ++y) {
+        const uchar* line = img.constScanLine(y);
+        for (int x = 0; x < 8; ++x) {
+            if (line[x] >= avg) h |= (1ull << bit);
+            ++bit;
+        }
+    }
+    return h;
+}
+
+quint64 ImageHash::dHash(const QImage& src) {
+    if (src.isNull()) return 0;
+    // 9x8 then compare horizontal neighbors (8*8 bits)
+    QImage img = src.convertToFormat(QImage::Format_Grayscale8).scaled(9, 8, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    quint64 h = 0;
+    int bit = 0;
+    for (int y = 0; y < 8; ++y) {
+        const uchar* line = img.constScanLine(y);
+        for (int x = 0; x < 8; ++x) {
+            uchar a = line[x];
+            uchar b = line[x+1];
+            if (a > b) h |= (1ull << bit);
+            ++bit;
+        }
+    }
+    return h;
+}

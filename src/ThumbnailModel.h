@@ -29,4 +29,8 @@ private:
     QList<ImageEntry> m_items;
     std::unique_ptr<SqliteStore> m_store;
     QString m_appData;
+
+    // Caches to avoid repeated disk IO and scaling during scrolling
+    mutable QHash<QString, QIcon> m_iconCache;      // path -> icon
+    mutable QSet<QString> m_iconInFlight;           // paths currently generating icons
 };

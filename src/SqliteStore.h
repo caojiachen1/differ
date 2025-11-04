@@ -8,6 +8,10 @@ struct ImageEntry {
     qint64 mtime{0};
     qint64 size{0};
     quint64 phash{0};
+    quint64 ahash{0};
+    quint64 dhash{0};
+    int width{0};
+    int height{0};
 };
 
 class SqliteStore : public QObject {
