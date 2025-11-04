@@ -73,17 +73,34 @@ QIcon ThumbnailModel::iconForPath(const QString& path) const {
 
 QList<ThumbnailModel::ResultItem> ThumbnailModel::searchSimilar(const QString& queryImage, int topK, int maxHamming) {
     ensureDb();
-    QImage img(queryImage);
+    // Load query image consistently with the indexer: honor EXIF orientation and avoid huge decodes
+    QImageReader reader(queryImage);
+    reader.setAutoTransform(true);
+    const QSize orig = reader.size();
+    if (orig.isValid()) {
+        QSize tgt = orig;
+        tgt.scale(4096, 4096, Qt::KeepAspectRatio);
+        reader.setScaledSize(tgt);
+    }
+    QImage img = reader.read();
     if (img.isNull()) return {};
     quint64 qh = ImageHash::pHash(img);
 
     // Load all and compute distances
-    QList<ResultItem> out;
-    for (const auto& e : m_store->loadAll()) {
+    QList<ResultItem> all;
+    const auto entries = m_store->loadAll();
+    for (const auto& e : entries) {
         int d = ImageHash::hammingDistance(qh, e.phash);
-        if (d <= maxHamming) out.push_back({e, d});
+        all.push_back({e, d});
     }
-    std::sort(out.begin(), out.end(), [](const ResultItem& a, const ResultItem& b){ return a.distance < b.distance; });
+    std::sort(all.begin(), all.end(), [](const ResultItem& a, const ResultItem& b){ return a.distance < b.distance; });
+
+    // Primary filter by threshold
+    QList<ResultItem> within;
+    for (const auto& r : all) if (r.distance <= maxHamming) within.push_back(r);
+
+    // Fallback: if nothing within threshold, return topK closest overall
+    QList<ResultItem> out = within.isEmpty() ? all : within;
     if (out.size() > topK) out = out.mid(0, topK);
     return out;
 }

@@ -122,9 +122,9 @@ void MainWindow::setupUi() {
     tb->addWidget(new QLabel("最大汉明距离:"));
     m_hammingSlider = new QSlider(Qt::Horizontal, this);
     m_hammingSlider->setRange(0, 64);
-    m_hammingSlider->setValue(10);
+    m_hammingSlider->setValue(16);
     tb->addWidget(m_hammingSlider);
-    m_hammingValue = new QLabel("10", this);
+    m_hammingValue = new QLabel("16", this);
     tb->addWidget(m_hammingValue);
 
     // Status bar
@@ -221,6 +221,15 @@ void MainWindow::openQueryImage() {
     // Perform search
     auto results = m_model->searchSimilar(fn, m_topKSpin->value(), m_hammingSlider->value());
     m_model->showResults(results);
+    if (results.isEmpty()) {
+        // Give a helpful hint when nothing is found
+        QMessageBox::information(this, "未找到相似图片",
+            "没有在当前阈值内找到相似图片。\n"
+            "建议：\n"
+            "1) 先在左侧选择要索引的目录并点击‘开始索引’；\n"
+            "2) 适当调大‘最大汉明距离’（例如 16~24）；\n"
+            "3) 也可以换一张更接近的图片再试试。");
+    }
 }
 
 void MainWindow::findSimilar() {
@@ -233,6 +242,11 @@ void MainWindow::findSimilar() {
     QString path = m_model->pathForIndex(sel.first());
     auto results = m_model->searchSimilar(path, m_topKSpin->value(), m_hammingSlider->value());
     m_model->showResults(results);
+    if (results.isEmpty()) {
+        QMessageBox::information(this, "未找到相似图片",
+            "没有在当前阈值内找到相似图片。\n"
+            "建议：调大‘最大汉明距离’，或先索引包含相似图片的目录。");
+    }
 }
 
 void MainWindow::onSelectionChanged() {
@@ -283,7 +297,7 @@ void MainWindow::loadSettings() {
     m_thumbSizeSlider->setValue(thumb);
     int topk = s.value("topK", 50).toInt();
     m_topKSpin->setValue(topk);
-    int ham = s.value("maxHamming", 10).toInt();
+    int ham = s.value("maxHamming", 16).toInt();
     m_hammingSlider->setValue(ham);
 }
 
