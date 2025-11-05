@@ -34,6 +34,7 @@ private slots:
     void openQueryImage();
     void findSimilar();
     void onSelectionChanged();
+    void showListContextMenu(const QPoint& pos);
 
 private:
     void setupUi();

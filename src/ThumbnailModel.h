@@ -22,6 +22,9 @@ public:
     QList<ResultItem> searchSimilar(const QString& queryImage, int topK, int maxHamming);
     void showResults(const QList<ResultItem>& results);
 
+    // Remove from database and model; returns number removed
+    int removePaths(const QStringList& paths);
+
 private:
     void ensureDb();
     QIcon iconForPath(const QString& path) const;

@@ -5,6 +5,10 @@
 #include "ImageIndexer.h"
 
 #include <QtWidgets>
+#ifdef Q_OS_WIN
+#  include <windows.h>
+#  include <shellapi.h>
+#endif
 
 static QString humanSize(qint64 bytes) {
     static const char* suffixes[] = {"B","KB","MB","GB","TB"};
@@ -53,6 +57,7 @@ void MainWindow::setupUi() {
     m_listView->setMouseTracking(true);
     m_listView->viewport()->setAttribute(Qt::WA_Hover, true);
     m_listView->setItemDelegate(new ThumbnailDelegate(m_listView));
+    m_listView->setContextMenuPolicy(Qt::CustomContextMenu);
     setCentralWidget(m_listView);
 
     // Left dock
@@ -147,6 +152,7 @@ void MainWindow::setupUi() {
 void MainWindow::setupConnections() {
     connect(m_browseBtn, &QPushButton::clicked, this, &MainWindow::chooseFolder);
     connect(m_indexBtn, &QPushButton::clicked, [this]{ startIndexing(m_folderEdit->text()); });
+    connect(m_listView, &QListView::customContextMenuRequested, this, &MainWindow::showListContextMenu);
     connect(m_showAllAction, &QAction::triggered, [this]{ loadAllFromDb(); });
     connect(m_thumbSizeSlider, &QSlider::valueChanged, [this](int v){
         m_thumbSizeLabel->setText(QString("缩略图: %1px").arg(v));
@@ -309,4 +315,107 @@ void MainWindow::saveSettings() {
     s.setValue("thumbSize", m_thumbSizeSlider->value());
     s.setValue("topK", m_topKSpin->value());
     s.setValue("maxHamming", m_hammingSlider->value());
+}
+
+void MainWindow::showListContextMenu(const QPoint& pos) {
+    QModelIndex idx = m_listView->indexAt(pos);
+    QList<QModelIndex> sel = m_listView->selectionModel()->selectedIndexes();
+    if (!idx.isValid() && sel.isEmpty()) return;
+    if (!idx.isValid() && !sel.isEmpty()) idx = sel.first();
+
+    // Collect paths
+    QStringList paths;
+    if (!sel.isEmpty()) {
+        for (const auto& i : sel) paths << m_model->pathForIndex(i);
+    } else {
+        paths << m_model->pathForIndex(idx);
+    }
+    const QString firstPath = paths.first();
+
+    QMenu menu(this);
+    QAction* actOpen = menu.addAction("打开");
+    QAction* actReveal = menu.addAction("在资源管理器中显示");
+    QAction* actCopy = menu.addAction("复制路径");
+    menu.addSeparator();
+    QAction* actQuery = menu.addAction("以此查找相似");
+    menu.addSeparator();
+    QAction* actRecycle = menu.addAction("移动到回收站...");
+    QAction* actDelete = menu.addAction("永久删除并从库中移除...");
+
+    QAction* chosen = menu.exec(m_listView->viewport()->mapToGlobal(pos));
+    if (!chosen) return;
+
+    if (chosen == actOpen) {
+        QDesktopServices::openUrl(QUrl::fromLocalFile(firstPath));
+    } else if (chosen == actReveal) {
+#ifdef Q_OS_WIN
+        QString param = "/select," + QDir::toNativeSeparators(firstPath);
+        QProcess::startDetached("explorer.exe", {param});
+#else
+        QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(firstPath).absolutePath()));
+#endif
+    } else if (chosen == actCopy) {
+        QGuiApplication::clipboard()->setText(paths.join("\n"));
+    } else if (chosen == actQuery) {
+        auto results = m_model->searchSimilar(firstPath, m_topKSpin->value(), m_hammingSlider->value());
+        m_model->showResults(results);
+        if (results.isEmpty()) {
+            QMessageBox::information(this, "未找到相似图片",
+                "没有在当前阈值内找到相似图片。\n建议：调大‘最大汉明距离’，或先索引包含相似图片的目录。");
+        }
+    } else if (chosen == actRecycle) {
+        const QString title = paths.size() == 1 ? QFileInfo(firstPath).fileName() : QString::number(paths.size()) + " 个文件";
+        if (QMessageBox::question(this, "移动到回收站", QString("确定将 %1 移动到回收站吗？").arg(title)) == QMessageBox::Yes) {
+#ifdef Q_OS_WIN
+            // Windows: use SHFileOperation to recycle (allow undo)
+            // Build double-null-terminated wide string
+            QString list;
+            for (const QString& p : paths) { list += QDir::toNativeSeparators(p); list += QChar('\0'); }
+            list += QChar('\0');
+            SHFILEOPSTRUCTW op{};
+            op.wFunc = FO_DELETE;
+            op.pFrom = (LPCWSTR)list.utf16();
+            op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT;
+            int res = SHFileOperationW(&op);
+            if (res == 0 && !op.fAnyOperationsAborted) {
+                // Remove DB entries and cached thumbs
+                m_model->removePaths(paths);
+                // also purge cached thumbnails on disk
+                const QString baseDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/thumbs";
+                for (const QString& p : paths) {
+                    const QString h = QString::number(qHash(QDir::toNativeSeparators(p)));
+                    QFile::remove(baseDir + "/" + h + "_256.jpg");
+                    QFile::remove(baseDir + "/" + h + "_384.jpg");
+                }
+            } else {
+                QMessageBox::warning(this, "操作失败", "移动到回收站失败或已取消。");
+            }
+#else
+            QMessageBox::information(this, "不支持", "当前平台未实现回收站操作。");
+#endif
+        }
+    } else if (chosen == actDelete) {
+        const QString title = paths.size() == 1 ? QFileInfo(firstPath).fileName() : QString::number(paths.size()) + " 个文件";
+        if (QMessageBox::question(this, "删除确认", QString("确定要删除 %1 吗？\n此操作不可撤销。").arg(title)) == QMessageBox::Yes) {
+            int okCount = 0;
+            for (const QString& p : paths) {
+                QFile file(p);
+                if (file.exists()) {
+                    if (file.remove()) ++okCount;
+                }
+            }
+            if (okCount > 0) {
+                m_model->removePaths(paths);
+                const QString baseDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/thumbs";
+                for (const QString& p : paths) {
+                    const QString h = QString::number(qHash(QDir::toNativeSeparators(p)));
+                    QFile::remove(baseDir + "/" + h + "_256.jpg");
+                    QFile::remove(baseDir + "/" + h + "_384.jpg");
+                }
+            } else {
+                // 即便文件不存在，也尝试从库中移除
+                m_model->removePaths(paths);
+            }
+        }
+    }
 }

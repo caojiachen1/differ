@@ -30,6 +30,8 @@ public:
 
     QList<ImageEntry> queryAllBasic();
 
+    bool removeByPath(const QString& path);
+
 private:
     QSqlDatabase m_db;
     QString m_connName;

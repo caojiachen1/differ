@@ -239,3 +239,20 @@ void ThumbnailModel::showResults(const QList<ResultItem>& results) {
     for (const auto& r : results) m_items.push_back(r.entry);
     endResetModel();
 }
+
+int ThumbnailModel::removePaths(const QStringList& paths) {
+    if (paths.isEmpty()) return 0;
+    ensureDb();
+    int removed = 0;
+    for (const QString& p : paths) {
+        if (m_store->removeByPath(QDir::toNativeSeparators(p))) {
+            ++removed;
+            // purge memory icon cache
+            m_iconCache.remove(p);
+            m_iconInFlight.remove(p);
+        }
+    }
+    // Reload to reflect removals
+    loadAll();
+    return removed;
+}

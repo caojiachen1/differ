@@ -140,3 +140,10 @@ QList<ImageEntry> SqliteStore::loadByIds(const QList<qint64>& ids) {
 QList<ImageEntry> SqliteStore::queryAllBasic() {
     return loadAll();
 }
+
+bool SqliteStore::removeByPath(const QString& path) {
+    QSqlQuery q(m_db);
+    q.prepare("DELETE FROM images WHERE path=?");
+    q.addBindValue(path);
+    return q.exec();
+}
