@@ -2,6 +2,11 @@
 #include "ImageHash.h"
 #include <QtGui/QImageReader>
 #include <QtConcurrent>
+#include <QMutex>
+#ifdef HAVE_OPENCV
+#include <opencv2/opencv.hpp>
+#include <opencv2/features2d.hpp>
+#endif
 
 namespace {
 static inline int clamp255(int v) { return v < 0 ? 0 : (v > 255 ? 255 : v); }
@@ -175,62 +180,115 @@ QIcon ThumbnailModel::iconForPath(const QString& path) const {
     return ph;
 }
 
-QList<ThumbnailModel::ResultItem> ThumbnailModel::searchSimilar(const QString& queryImage, int topK, int maxHamming) {
+QList<ThumbnailModel::ResultItem> ThumbnailModel::searchSimilar(const QString& queryImage, int topK, int /*maxHamming*/) {
     ensureDb();
-    // Load query image consistently with the indexer: honor EXIF orientation and avoid huge decodes
-    QImageReader reader(queryImage);
-    reader.setAutoTransform(true);
-    const QSize orig = reader.size();
-    if (orig.isValid()) {
-        QSize tgt = orig;
-        tgt.scale(4096, 4096, Qt::KeepAspectRatio);
-        reader.setScaledSize(tgt);
-    }
-    QImage img = reader.read();
-    if (img.isNull()) return {};
-    quint64 qp = ImageHash::pHash(img);
-    quint64 qa = ImageHash::aHash(img);
-    quint64 qd = ImageHash::dHash(img);
-    const int qw = img.width();
-    const int qh = img.height();
+#ifndef HAVE_OPENCV
+    Q_UNUSED(queryImage);
+    Q_UNUSED(topK);
+    // OpenCV not available, return empty to trigger UI hint
+    return {};
+#else
+    // Load query image (respect EXIF), convert to BGR for OpenCV
+    QImageReader qreader(queryImage);
+    qreader.setAutoTransform(true);
+    QSize qsz = qreader.size();
+    if (qsz.isValid()) { qsz.scale(2048, 2048, Qt::KeepAspectRatio); qreader.setScaledSize(qsz); }
+    QImage qimg = qreader.read();
+    if (qimg.isNull()) return {};
+    QImage qbgr = qimg.convertToFormat(QImage::Format_BGR888);
+    cv::Mat qMat(qbgr.height(), qbgr.width(), CV_8UC3, const_cast<uchar*>(qbgr.constBits()), qbgr.bytesPerLine());
+    qMat = qMat.clone();
 
-    // Load all and compute distances
-    QList<ResultItem> all;
+    // Query descriptors and histogram - reduce ORB features to 300 for speed
+    auto orb = cv::ORB::create(300);
+    std::vector<cv::KeyPoint> qkps; cv::Mat qdesc;
+    orb->detectAndCompute(qMat, cv::noArray(), qkps, qdesc);
+    
+    // Calculate query histogram with reduced bins for speed
+    cv::Mat qhsv; cv::cvtColor(qMat, qhsv, cv::COLOR_BGR2HSV);
+    int hbins=16, sbins=16; int histSize[] = {hbins, sbins};
+    float hranges[] = {0,180}; float sranges[] = {0,256}; const float* ranges[] = {hranges, sranges};
+    int channels[] = {0,1}; cv::Mat qhist;
+    cv::calcHist(&qhsv, 1, channels, cv::Mat(), qhist, 2, histSize, ranges, true, false);
+    cv::normalize(qhist, qhist, 1, 0, cv::NORM_L1);
+
+    // Iterate all entries and compute similarity in parallel
     const auto entries = m_store->loadAll();
-    all.reserve(entries.size());
-    for (const auto& e : entries) {
-        int dp = ImageHash::hammingDistance(qp, e.phash);
-        int score = dp * 2; // pHash weight 2
-        if (e.ahash) score += ImageHash::hammingDistance(qa, e.ahash);
-        if (e.dhash) score += ImageHash::hammingDistance(qd, e.dhash);
-        // mild aspect ratio penalty
-        if (qw > 0 && qh > 0 && e.width > 0 && e.height > 0) {
-            double arQ = (double)qw / (double)qh;
-            double arE = (double)e.width / (double)e.height;
-            double diff = std::abs(arQ - arE);
-            score += (int)std::min(8.0, diff * 6.0); // up to +8 penalty
-        }
-        all.push_back({e, score});
-    }
-    std::sort(all.begin(), all.end(), [](const ResultItem& a, const ResultItem& b){ return a.distance < b.distance; });
+    struct Pair { ImageEntry e; double sim; };
+    std::vector<Pair> pairs; pairs.resize(entries.size());
 
-    // Primary filter by pHash threshold for recall control
-    QList<ResultItem> within;
-    for (const auto& e : entries) {
-        int dp = ImageHash::hammingDistance(qp, e.phash);
-        if (dp <= maxHamming) {
-            // find its score entry
-            // linear search is fine for small lists; could optimize if needed
-            for (const auto& r : all) {
-                if (r.entry.id == e.id) { within.push_back(r); break; }
-            }
+    auto loadCandidate = [this](const QString& path)->cv::Mat{
+        // Prefer cached 256 thumb (faster to load than 384)
+        const QString base = m_appData + "/thumbs/" + QString::number(qHash(QDir::toNativeSeparators(path)));
+        const QString p256 = base + "_256.jpg";
+        const QString p384 = base + "_384.jpg";
+        QString use = QFile::exists(p256) ? p256 : (QFile::exists(p384) ? p384 : path);
+        QImageReader r(use); r.setAutoTransform(true);
+        QSize osz = r.size(); 
+        // Further reduce size for faster processing (384 is enough)
+        if (osz.isValid()) { osz.scale(384, 384, Qt::KeepAspectRatio); r.setScaledSize(osz); }
+        QImage img = r.read();
+        if (img.isNull()) return cv::Mat();
+        QImage bgr = img.convertToFormat(QImage::Format_BGR888);
+        cv::Mat m(bgr.height(), bgr.width(), CV_8UC3, const_cast<uchar*>(bgr.constBits()), bgr.bytesPerLine());
+        return m.clone();
+    };
+
+    // Parallel computation using QtConcurrent
+    QtConcurrent::blockingMap(pairs, [&](Pair& pair) {
+        int idx = &pair - pairs.data();
+        const auto& e = entries[idx];
+        pair.e = e;
+        
+        cv::Mat cMat = loadCandidate(e.path);
+        if (cMat.empty()) { pair.sim = 0.0; return; }
+        
+        // ORB with reduced features for speed
+        auto orbLocal = cv::ORB::create(300);
+        std::vector<cv::KeyPoint> ckps; cv::Mat cdesc;
+        orbLocal->detectAndCompute(cMat, cv::noArray(), ckps, cdesc);
+        double orbScore = 0.0;
+        if (!qdesc.empty() && !cdesc.empty()) {
+            cv::BFMatcher matcher(cv::NORM_HAMMING, false);
+            std::vector<std::vector<cv::DMatch>> knn;
+            matcher.knnMatch(qdesc, cdesc, knn, 2);
+            int good=0; for (auto& v: knn){ if (v.size()==2 && v[0].distance < 0.75*v[1].distance) ++good; }
+            orbScore = (qkps.empty()?0.0: (double)good / (double)qkps.size());
         }
+        
+        // HSV hist - use smaller bins for faster computation
+        cv::Mat chsv; cv::cvtColor(cMat, chsv, cv::COLOR_BGR2HSV);
+        int hb=16, sb=16; int hs[] = {hb, sb};
+        float hr[] = {0,180}; float sr[] = {0,256}; const float* r[] = {hr, sr};
+        int ch[] = {0,1}; cv::Mat chist;
+        cv::calcHist(&chsv, 1, ch, cv::Mat(), chist, 2, hs, r, true, false);
+        cv::normalize(chist, chist, 1, 0, cv::NORM_L1);
+        double histCorr = cv::compareHist(qhist, chist, cv::HISTCMP_CORREL);
+        
+        pair.sim = std::max(0.0, std::min(1.0, 0.7*orbScore + 0.3*((histCorr+1.0)/2.0)));
+    });
+
+    std::stable_sort(pairs.begin(), pairs.end(), [](const Pair& a, const Pair& b){ return a.sim > b.sim; });
+
+    // Build results
+    QList<ResultItem> out;
+    out.reserve(std::min<int>(topK, pairs.size()));
+    for (int i = 0; i < pairs.size() && i < topK; ++i) {
+        // Encode similarity as inverse distance (0..1000)
+        int dist = (int)std::lround((1.0 - pairs[i].sim) * 1000.0);
+        out.push_back({pairs[i].e, dist});
     }
 
-    // Fallback: if nothing within threshold, return topK closest overall
-    QList<ResultItem> out = within.isEmpty() ? all : within;
-    if (out.size() > topK) out = out.mid(0, topK);
+    // Ensure exact same image first if present
+    if (!out.isEmpty()) {
+        int selfIdx = -1;
+        for (int i = 0; i < out.size(); ++i) {
+            if (QDir::toNativeSeparators(out[i].entry.path) == QDir::toNativeSeparators(queryImage)) { selfIdx = i; break; }
+        }
+        if (selfIdx > 0) std::swap(out[0], out[selfIdx]);
+    }
     return out;
+#endif
 }
 
 void ThumbnailModel::showResults(const QList<ResultItem>& results) {

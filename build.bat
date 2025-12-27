@@ -12,9 +12,52 @@ set "BUILD_DIR=%BUILD_BASE%"
 
 REM Configure Qt path if not provided
 if not defined CMAKE_PREFIX_PATH (
-    set "CMAKE_PREFIX_PATH=D:\Qt\6.9.3\mingw_64"
-    echo [info] CMAKE_PREFIX_PATH not set. Using default: "!CMAKE_PREFIX_PATH!"
+    REM Try to find Qt MSVC kit first (priority: 6.10.0 > 6.9.3)
+    if exist "D:\Qt\6.10.0\msvc2022_64" (
+        set "CMAKE_PREFIX_PATH=D:\Qt\6.10.0\msvc2022_64"
+    ) else if exist "D:\Qt\6.10.0\msvc2019_64" (
+        set "CMAKE_PREFIX_PATH=D:\Qt\6.10.0\msvc2019_64"
+    ) else if exist "D:\Qt\6.9.3\msvc2022_64" (
+        set "CMAKE_PREFIX_PATH=D:\Qt\6.9.3\msvc2022_64"
+    ) else if exist "D:\Qt\6.9.3\msvc2019_64" (
+        set "CMAKE_PREFIX_PATH=D:\Qt\6.9.3\msvc2019_64"
+    ) else if defined USE_MINGW (
+        REM Explicitly requested MinGW
+        if exist "D:\Qt\6.10.0\mingw_64" (
+            set "CMAKE_PREFIX_PATH=D:\Qt\6.10.0\mingw_64"
+        ) else (
+            set "CMAKE_PREFIX_PATH=D:\Qt\6.9.3\mingw_64"
+        )
+    ) else (
+        REM Fallback to MinGW if MSVC not found
+        echo [warning] MSVC Qt kit not found, falling back to MinGW
+        echo [warning] For better performance, install Qt MSVC via Qt Maintenance Tool
+        if exist "D:\Qt\6.10.0\mingw_64" (
+            set "CMAKE_PREFIX_PATH=D:\Qt\6.10.0\mingw_64"
+        ) else (
+            set "CMAKE_PREFIX_PATH=D:\Qt\6.9.3\mingw_64"
+        )
+    )
+    echo [info] CMAKE_PREFIX_PATH not set. Using: "!CMAKE_PREFIX_PATH!"
     echo        Edit build.bat to change this path if needed.
+)
+
+REM Auto-detect vcpkg installation
+if not defined VCPKG_ROOT (
+    if exist "C:\vcpkg\scripts\buildsystems\vcpkg.cmake" (
+        set "VCPKG_ROOT=C:\vcpkg"
+    ) else if exist "D:\vcpkg\scripts\buildsystems\vcpkg.cmake" (
+        set "VCPKG_ROOT=D:\vcpkg"
+    ) else if exist "%USERPROFILE%\vcpkg\scripts\buildsystems\vcpkg.cmake" (
+        set "VCPKG_ROOT=%USERPROFILE%\vcpkg"
+    )
+)
+if defined VCPKG_ROOT (
+    echo [info] Found vcpkg at: !VCPKG_ROOT!
+    set "VCPKG_TOOLCHAIN=-DCMAKE_TOOLCHAIN_FILE=!VCPKG_ROOT!/scripts/buildsystems/vcpkg.cmake"
+) else (
+    echo [info] vcpkg not found. Relying on CMakeLists.txt vcpkg detection or system OpenCV.
+    set "VCPKG_TOOLCHAIN="
 )
 
 REM build dir will be finalized per generator below
@@ -24,14 +67,26 @@ set "QTPREFIX=%CMAKE_PREFIX_PATH%"
 set "QTPREFIX_FWD=%QTPREFIX:\=/%"
 set "QT6_DIR_FWD=%QTPREFIX_FWD%/lib/cmake/Qt6"
 
-REM Detect Qt kit type (MinGW vs MSVC) from CMAKE_PREFIX_PATH
-echo %CMAKE_PREFIX_PATH% | find /I "mingw" >nul
-if %errorlevel%==0 goto use_mingw
+REM Detect Qt kit type from CMAKE_PREFIX_PATH
+REM If USE_MINGW is explicitly set, force MinGW
+REM Otherwise, prefer MSVC (only use MinGW if path contains "mingw" and USE_MINGW not disabled)
+if defined USE_MINGW goto use_mingw
 
-REM Assume MSVC/VS Qt kit – try Visual Studio generator first
+echo %CMAKE_PREFIX_PATH% | find /I "mingw" >nul
+if %errorlevel%==0 (
+    echo [info] Detected MinGW Qt kit from CMAKE_PREFIX_PATH: "%CMAKE_PREFIX_PATH%"
+    echo [info] To use MSVC instead, set CMAKE_PREFIX_PATH to an MSVC Qt kit or define USE_MSVC=1
+    goto use_mingw
+)
+
+REM Default: try MSVC generators
+echo [info] Using MSVC toolchain (default behavior)
+echo [info] To use MinGW, set CMAKE_PREFIX_PATH to a MinGW Qt kit or define USE_MINGW=1
+
+REM Try Visual Studio generator first
 set "BUILD_DIR=%ROOT%\build-vs"
 if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%" >nul 2>&1
-cmake -S "%ROOT%" -B "%BUILD_DIR%" -G "Visual Studio 17 2022" -A x64 -DCMAKE_PREFIX_PATH="%QTPREFIX_FWD%" -DQt6_DIR="%QT6_DIR_FWD%"
+cmake -S "%ROOT%" -B "%BUILD_DIR%" -G "Visual Studio 17 2022" -A x64 %VCPKG_TOOLCHAIN% -DCMAKE_PREFIX_PATH="%QTPREFIX_FWD%" -DQt6_DIR="%QT6_DIR_FWD%"
 if errorlevel 1 goto try_nmake
 
 echo [info] Configured with Visual Studio generator.
@@ -44,7 +99,7 @@ if errorlevel 1 goto mingw_toolchain_error
 echo [info] Trying MinGW Makefiles generator...
 set "BUILD_DIR=%ROOT%\build-mingw"
 if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%" >nul 2>&1
-cmake -S "%ROOT%" -B "%BUILD_DIR%" -G "MinGW Makefiles" -DCMAKE_PREFIX_PATH="%QTPREFIX_FWD%" -DQt6_DIR="%QT6_DIR_FWD%"
+cmake -S "%ROOT%" -B "%BUILD_DIR%" -G "MinGW Makefiles" %VCPKG_TOOLCHAIN% -DCMAKE_PREFIX_PATH="%QTPREFIX_FWD%" -DQt6_DIR="%QT6_DIR_FWD%"
 if errorlevel 1 goto error
 echo [info] Configured with MinGW Makefiles generator.
 goto build
@@ -64,7 +119,7 @@ if errorlevel 1 (
 echo [info] Trying NMake Makefiles generator...
 set "BUILD_DIR=%ROOT%\build-nmake"
 if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%" >nul 2>&1
-cmake -S "%ROOT%" -B "%BUILD_DIR%" -G "NMake Makefiles" -DCMAKE_PREFIX_PATH="%QTPREFIX_FWD%" -DQt6_DIR="%QT6_DIR_FWD%"
+cmake -S "%ROOT%" -B "%BUILD_DIR%" -G "NMake Makefiles" %VCPKG_TOOLCHAIN% -DCMAKE_PREFIX_PATH="%QTPREFIX_FWD%" -DQt6_DIR="%QT6_DIR_FWD%"
 if errorlevel 1 goto error
 
 echo [info] Configured with NMake generator.
